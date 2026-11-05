@@ -9,7 +9,9 @@ local R = G.g_resources
 local H = G.HTTP
 local BOT = modules.game_bot
 local TARGET = "/bot/" .. CONFIG_NAME
-local UPDATER = TARGET .. "/__CustomProfileUpdater.lua"
+local DATA = "/bot_update_data/" .. CONFIG_NAME
+local BASELINE = DATA .. "/original.zip"
+local REPORT = DATA .. "/last-update.txt"
 local STATE_KEY = "CustomProfileUpdaterState"
 local old = G[STATE_KEY]
 if old then
@@ -19,11 +21,11 @@ if old then
     if old.timer then G.removeEvent(old.timer) end
     if old.requestTimer then G.removeEvent(old.requestTimer) end
 end
-local state = {busy = false, timer = nil, revision = 6, pendingVersion = nil, requestId = 0}
+local state = {busy = false, timer = nil, revision = 7, pendingVersion = nil, requestId = 0}
 G[STATE_KEY] = state
 local controls = setupUI([[
 Panel
-  height: 68
+  height: 88
 
   Label
     id: localVersion
@@ -59,7 +61,7 @@ Panel
     anchors.left: parent.left
     anchors.right: parent.right
     text: Comprobando...
-    height: 22
+    height: 42
     margin-top: 3
     text-wrap: true
 ]])
@@ -109,7 +111,7 @@ local function setBusy(value)
     controls.check:setEnabled(not value)
     controls.updateButton:setEnabled(not value and state.pendingVersion ~= nil)
     controls.updateButton:setVisible(state.pendingVersion ~= nil)
-    controls:setHeight(state.pendingVersion and 93 or 68)
+    controls:setHeight(state.pendingVersion and 113 or 88)
 end
 local function parseVersion(text)
     if type(text) ~= "string" then return nil end
@@ -117,6 +119,7 @@ local function parseVersion(text)
         or text:match('return%s*["\'](%d[%d%.]*)["\']')
 end
 local function localVersion()
+    if state.appliedVersion then return state.appliedVersion end
     if R.fileExists(TARGET .. "/Version.lua") then
         return parseVersion(R.readFileContents(TARGET .. "/Version.lua"))
     end
@@ -142,21 +145,98 @@ local function mkdir(path)
     if not R.directoryExists(path) then R.makeDir(path) end
     if not R.directoryExists(path) then error("no se pudo crear " .. path) end
 end
-local scriptSource
-if configDir then
-    for _, filename in ipairs({"CustomProfile_loader.lua", "__CustomProfileUpdater.lua"}) do
-        local sourcePath = configDir .. "/" .. filename
-        if R.fileExists(sourcePath) then
-            scriptSource = R.readFileContents(sourcePath)
-            break
-        end
+local JSON = G.json or json
+local MAX_BYTES = 256 * 1024 * 1024
+local function safePath(path)
+    assert(type(path) == "string" and #path > 0 and #path <= 500 and
+        not path:find('[%c\\:*?"<>|]') and not path:find("//", 1, true) and
+        path:sub(1, 1) ~= "/" and path:sub(-1) ~= "/", "ruta no valida")
+    for part in path:gmatch("[^/]+") do
+        local name = part:lower():match("^[^.]+") or ""
+        assert(part ~= "." and part ~= ".." and not part:find("[%. ]$") and
+            name ~= "con" and name ~= "prn" and name ~= "aux" and name ~= "nul" and
+            not name:match("^com[1-9]$") and not name:match("^lpt[1-9]$"), "ruta reservada")
     end
 end
-local function persistUpdater()
-    if not scriptSource then return end
-    if not R.fileExists(UPDATER) or R.readFileContents(UPDATER) ~= scriptSource then
-        writeVerified(UPDATER, scriptSource)
+local function protected(path)
+    local lower = path:lower()
+    local first = lower:match("^[^/]+")
+    return first == "storage" or first == "cavebot_configs" or first == "targetbot_configs" or
+        first == "profiles" or first == "configs" or first == "config" or first == "backups" or
+        first == ".git" or first == "tests" or first == "bot_update_data" or
+        lower == "__customprofileupdater.lua" or lower == "customprofile_loader.lua" or
+        lower:match("%.json$") or lower:match("%.cfg$") or lower:match("%.zip$") or
+        lower:match("%.ini$") or lower:match("%.log$") or lower:match("%.bak$")
+end
+local function ensureParent(path)
+    local current = ""
+    for part in path:match("^(.*)/[^/]+$"):gmatch("[^/]+") do
+        current = current .. "/" .. part
+        mkdir(current)
     end
+end
+local function unpackSnapshot(path)
+    local archive = R.decompressArchive(path)
+    assert(type(archive) == "table", "registro de originales no valido")
+    local files, metadata = {}, nil
+    for name, contents in pairs(archive) do
+        name = name:gsub("^/+", "")
+        if name == "snapshot.json" then metadata = JSON.decode(contents)
+        elseif name:sub(1, 6) == "files/" then
+            local relative = name:sub(7)
+            safePath(relative)
+            files[relative] = contents
+        end
+    end
+    assert(type(metadata) == "table" and metadata.format == "CustomBotUpdateSnapshot" and
+        metadata.profile == CONFIG_NAME and type(metadata.empty) == "table", "registro incompatible")
+    for _, name in ipairs(metadata.empty) do safePath(name); files[name] = "" end
+    return files, metadata
+end
+local function saveSnapshot(path, files, version)
+    local archive, empty = {}, {}
+    for name, contents in pairs(files) do
+        safePath(name)
+        if contents == "" then empty[#empty + 1] = name else archive["files/" .. name] = contents end
+    end
+    archive["snapshot.json"] = JSON.encode({format = "CustomBotUpdateSnapshot", profile = CONFIG_NAME,
+        version = version, empty = empty, conflicts = state.conflicts or 0})
+    local encoded = R.createArchive(archive)
+    assert(type(encoded) == "string" and #encoded > 0, "no se pudo crear el respaldo")
+    ensureParent(path)
+    writeVerified(path, encoded)
+    local verified = unpackSnapshot(path)
+    for name, contents in pairs(files) do assert(verified[name] == contents, "respaldo incompleto: " .. name) end
+    for name in pairs(verified) do assert(files[name] ~= nil, "respaldo inesperado") end
+end
+local function collectLocal()
+    local files, folders, total, count = {}, {""}, 0, 0
+    local index = 1
+    while folders[index] do
+        local folder = folders[index]
+        local entries = R.listDirectoryFiles(TARGET .. "/" .. folder, false, false)
+        assert(type(entries) == "table", "no se pudo listar el custom")
+        for _, part in ipairs(entries) do
+            safePath(part)
+            assert(not part:find("/", 1, true), "nombre de archivo inesperado")
+            local path = folder .. part
+            if path ~= ".git" and path:sub(1, 5) ~= ".git/" then
+                local absolute = TARGET .. "/" .. path
+                if R.fileExists(absolute) then
+                    local contents = R.readFileContents(absolute)
+                    assert(type(contents) == "string", "no se pudo leer " .. path)
+                    count, total = count + 1, total + #contents
+                    assert(count <= 10000 and total <= MAX_BYTES, "respaldo supera los limites")
+                    files[path] = contents
+                elseif R.directoryExists(absolute) then
+                    assert(#folders < 10000, "demasiadas carpetas")
+                    folders[#folders + 1] = path .. "/"
+                end
+            end
+        end
+        index = index + 1
+    end
+    return files
 end
 
 local checkVersion
@@ -193,10 +273,10 @@ local function finish(version, added, kept, initial)
     controls.updateButton:setText("Actualizar")
     setBusy(false)
     window.progress:setPercent(100)
-    message(initial and "instalacion completada" or "actualizacion completada")
-    window.detail:setText(added .. " archivos nuevos y " .. kept .. " existentes conservados")
+    message(state.notice or (initial and "instalacion completada" or "actualizacion completada"))
+    window.detail:setText("Respaldo: " .. (state.backupPath or "") .. " | Informe: " .. REPORT)
     state.installing = false
-    window:hide()
+    if state.conflicts and state.conflicts > 0 then window:show() else window:hide() end
     scheduleNext()
     G.scheduleEvent(function()
         BOT.refresh()
@@ -211,7 +291,11 @@ local function extractAndMerge(path, expectedVersion)
     end
     local files = R.decompressArchive(archivePath)
     if type(files) ~= "table" then error("no se pudo extraer el zip") end
+    assert(type(R.createArchive) == "function" and type(R.listDirectoryFiles) == "function" and
+        JSON and type(JSON.encode) == "function" and type(JSON.decode) == "function",
+        "el cliente no permite respaldos seguros")
     local entries, root, sameRoot = {}, nil, true
+    local total = 0
     for name, contents in pairs(files) do
         if type(name) ~= "string" or type(contents) ~= "string" then error("zip no valido") end
         name = name:gsub("\\", "/"):gsub("^/+", "")
@@ -220,6 +304,9 @@ local function extractAndMerge(path, expectedVersion)
             if part == ".." or part == "." then error("ruta no permitida en el zip") end
         end
         if name ~= "" and name:sub(-1) ~= "/" then
+            safePath(name)
+            total = total + #contents
+            assert(total <= MAX_BYTES and #entries < 10000, "zip supera los limites")
             local folder = name:match("^([^/]+)/")
             if not folder then sameRoot = false
             elseif not root then root = folder
@@ -228,28 +315,79 @@ local function extractAndMerge(path, expectedVersion)
         end
     end
     local versionContents
-    local planned, kept, seen = {}, 0, {}
+    local remote, seen = {}, {}
     for _, entry in ipairs(entries) do
         if sameRoot and root then entry.path = entry.path:sub(#root + 2) end
-        if seen[entry.path] then error("rutas duplicadas en el zip") end
-        seen[entry.path] = true
+        safePath(entry.path)
+        local lower = entry.path:lower()
+        if seen[lower] then error("rutas duplicadas en el zip") end
+        seen[lower] = true
         if entry.path == "Version.lua" then
             versionContents = entry.contents
-        elseif entry.path ~= "__CustomProfileUpdater.lua" then
-            local destination = TARGET .. "/" .. entry.path
-            if R.fileExists(destination) or R.directoryExists(destination) then
-                kept = kept + 1
-            else
-                planned[#planned + 1] = entry
-            end
         end
+        if not protected(entry.path) then remote[entry.path] = entry.contents end
     end
     if parseVersion(versionContents) ~= expectedVersion then
         error("la version del zip no coincide con la version consultada vuelve a comprobar")
     end
     local initial = not localVersion()
-    mkdir(TARGET)
-    persistUpdater()
+    if BOT.save then BOT.save() end
+    local localFiles = collectLocal()
+    local baseline = {}
+    if R.fileExists(BASELINE) then baseline = unpackSnapshot(BASELINE) end
+    local planned, conflicts, conflictFiles, lines, kept = {}, {}, {}, {}, 0
+    for name, contents in pairs(remote) do
+        local current, original = localFiles[name], baseline[name]
+        if R.directoryExists(TARGET .. "/" .. name) then
+            conflicts[#conflicts + 1] = name .. " (existe una carpeta)"
+            conflictFiles[name] = contents
+        elseif current == contents then
+            kept = kept + 1
+        elseif current == nil and original == nil then
+            planned[#planned + 1] = {path = name, contents = contents}
+        elseif current ~= nil and original ~= nil and current == original then
+            planned[#planned + 1] = {path = name, contents = contents, before = current}
+        elseif original == nil or contents ~= original then
+            conflicts[#conflicts + 1] = name .. (original == nil and " (sin referencia previa)" or " (cambios locales y remotos)")
+            conflictFiles[name] = contents
+        else
+            kept = kept + 1
+        end
+    end
+    table.sort(planned, function(a, b)
+        if a.path == "Version.lua" then return false end
+        if b.path == "Version.lua" then return true end
+        return a.path < b.path
+    end)
+    table.sort(conflicts)
+    mkdir("/bot_update_data")
+    mkdir(DATA)
+    local stamp = tostring(G.os.time())
+    local backupPath = DATA .. "/backup-" .. stamp .. ".zip"
+    local suffix = 0
+    while R.fileExists(backupPath) do
+        suffix = suffix + 1
+        backupPath = DATA .. "/backup-" .. stamp .. "-" .. suffix .. ".zip"
+    end
+    message("creando y verificando respaldo")
+    if R.fileExists(BASELINE) then
+        writeVerified(backupPath .. ".original.zip", R.readFileContents(BASELINE))
+    end
+    saveSnapshot(backupPath, localFiles, localVersion())
+    state.backupPath = backupPath
+    lines = {"Perfil: " .. CONFIG_NAME, "Version remota: " .. expectedVersion,
+        "Respaldo: " .. backupPath, "Conflictos conservados: " .. #conflicts}
+    for _, name in ipairs(conflicts) do
+        lines[#lines + 1] = "CONFLICTO: " .. name
+    end
+    for _, entry in ipairs(planned) do lines[#lines + 1] = "APLICAR: " .. entry.path end
+    writeVerified(REPORT, table.concat(lines, "\n"))
+    -- Guardar las alternativas remotas fuera del custom, nunca encima de archivos del usuario.
+    for path, contents in pairs(conflictFiles) do
+        local alternative = backupPath .. ".remote/" .. path
+        ensureParent(alternative)
+        writeVerified(alternative, contents)
+    end
     local index, added = 1, 0
     local function batch()
         local ok, err = pcall(function()
@@ -257,20 +395,12 @@ local function extractAndMerge(path, expectedVersion)
             while index <= last do
                 local entry = planned[index]
                 local destination = TARGET .. "/" .. entry.path
-                if not R.fileExists(destination) and not R.directoryExists(destination) then
-                    local folder = TARGET
-                    local parent = entry.path:match("^(.*)/[^/]+$")
-                    if parent then
-                        for part in parent:gmatch("[^/]+") do
-                            folder = folder .. "/" .. part
-                            mkdir(folder)
-                        end
-                    end
-                    writeVerified(destination, entry.contents)
-                    added = added + 1
-                else
-                    kept = kept + 1
-                end
+                local current = R.fileExists(destination) and R.readFileContents(destination) or nil
+                assert(current == entry.before and not R.directoryExists(destination),
+                    "archivo cambiado durante la actualizacion: " .. entry.path .. "; respaldo: " .. backupPath)
+                ensureParent(destination)
+                writeVerified(destination, entry.contents)
+                added = added + 1
                 index = index + 1
             end
             window.progress:setPercent(math.floor(math.min(index - 1, #planned) / math.max(1, #planned) * 100))
@@ -278,13 +408,17 @@ local function extractAndMerge(path, expectedVersion)
             if index <= #planned then
                 G.scheduleEvent(batch, 10)
             else
-                writeVerified(TARGET .. "/Version.lua", versionContents)
+                state.conflicts = #conflicts
+                saveSnapshot(BASELINE, remote, expectedVersion)
+                state.appliedVersion = expectedVersion
+                state.notice = #conflicts > 0 and ("Actualizado con " .. #conflicts .. " conflictos. Ver informe.") or nil
+                if state.notice then print("[CustomBot Update] " .. state.notice .. " " .. REPORT) end
                 finish(expectedVersion, added, kept, initial)
             end
         end)
-        if not ok then fail("instalacion detenida " .. tostring(err)) end
+        if not ok then fail("instalacion detenida " .. tostring(err) .. "; respaldo: " .. backupPath) end
     end
-    message("agregando archivos nuevos")
+    message("aplicando actualizacion segura")
     window.progress:setPercent(0)
     G.scheduleEvent(batch, 10)
 end
@@ -347,7 +481,7 @@ checkVersion = function()
                 else
                     setBusy(false)
                     controls.updateButton:setText("Actualizar")
-                    message("Actualizado")
+                    message(state.notice or "Actualizado")
                     window.progress:setPercent(100)
                     window.detail:setText("proxima comprobacion en " .. (CHECK_INTERVAL / 1000) .. " segundos")
                 end
@@ -366,7 +500,14 @@ controls.updateButton.onClick = function()
     download(version)
 end
 local ok, err = pcall(function()
-    if R.directoryExists(TARGET) then persistUpdater() end
+    if R.fileExists(BASELINE) then
+        local _, metadata = unpackSnapshot(BASELINE)
+        state.appliedVersion = metadata.version
+        state.conflicts = metadata.conflicts or 0
+        if state.conflicts > 0 then
+            state.notice = "Actualizado con " .. state.conflicts .. " conflictos. Ver informe."
+        end
+    end
 end)
 if not ok then
     fail(tostring(err))
