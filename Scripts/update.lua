@@ -1,8 +1,9 @@
 setDefaultTab("Main")
-local CONFIG_NAME = "CustomBot_GitHub"
+local CONFIG_NAME = modules.game_bot.contentsPanel.config:getCurrentOption().text
 local REPOSITORY = "oldpowerz/CustomProfile"
 local BRANCH = "main"
 local CHECK_INTERVAL = 60000
+local CHECK_TIMEOUT = 30000
 local G = modules._G
 local R = G.g_resources
 local H = G.HTTP
@@ -12,15 +13,13 @@ local UPDATER = TARGET .. "/__CustomProfileUpdater.lua"
 local STATE_KEY = "CustomProfileUpdaterState"
 local old = G[STATE_KEY]
 if old then
-    if old.revision == 5 and old.controls and not old.controls:isDestroyed() then
-        return
-    end
-    if old.busy then return end
+    if old.busy and old.installing then return end
     if old.window and not old.window:isDestroyed() then old.window:destroy() end
     if old.controls and not old.controls:isDestroyed() then old.controls:destroy() end
     if old.timer then G.removeEvent(old.timer) end
+    if old.requestTimer then G.removeEvent(old.requestTimer) end
 end
-local state = {busy = false, timer = nil, revision = 5, pendingVersion = nil}
+local state = {busy = false, timer = nil, revision = 6, pendingVersion = nil, requestId = 0}
 G[STATE_KEY] = state
 local controls = setupUI([[
 Panel
@@ -161,18 +160,30 @@ local function persistUpdater()
 end
 
 local checkVersion
+local fail
+local function isActive()
+    return G[STATE_KEY] == state and not controls:isDestroyed()
+end
 local function scheduleNext()
     if state.timer then G.removeEvent(state.timer) end
     state.timer = G.scheduleEvent(function()
         state.timer = nil
-        checkVersion()
+        if not isActive() then return end
+        if state.busy then
+            scheduleNext()
+        else
+            checkVersion()
+        end
     end, CHECK_INTERVAL)
 end
-local function fail(text)
+fail = function(text)
+    if not isActive() then return end
+    if state.requestTimer then G.removeEvent(state.requestTimer); state.requestTimer = nil end
+    state.requestId = state.requestId + 1
     state.pendingVersion = nil
     setBusy(false)
     message(tostring(text):lower():gsub("[%p]", " "):gsub("%s+", " "))
-    window.detail:setText("se comprobara de nuevo en un minuto")
+    window.detail:setText("se comprobara de nuevo en " .. (CHECK_INTERVAL / 1000) .. " segundos")
     if state.installing then window:show() end
     state.installing = false
     scheduleNext()
@@ -300,35 +311,48 @@ local function download(version)
     if not ok then fail(tostring(err)) end
 end
 checkVersion = function()
-    if state.busy then return end
+    if not isActive() or state.busy then return end
     if state.timer then G.removeEvent(state.timer); state.timer = nil end
     state.pendingVersion = nil
     setBusy(true)
-    message("Comprobando...")
-    window.progress:setPercent(0)
-    local current = localVersion()
-    controls.localVersion:setText("Version: " .. (current or "sin instalar"))
-    local url = "https://raw.githubusercontent.com/" .. REPOSITORY .. "/" .. BRANCH .. "/Version.lua?t=" .. G.os.time()
+    state.requestId = state.requestId + 1
+    local requestId = state.requestId
+    scheduleNext()
+    state.requestTimer = G.scheduleEvent(function()
+        state.requestTimer = nil
+        if isActive() and state.requestId == requestId then
+            fail("la consulta de version ha agotado el tiempo de espera")
+        end
+    end, CHECK_TIMEOUT)
     local ok, err = pcall(function()
+        message("Comprobando...")
+        window.progress:setPercent(0)
+        local current = localVersion()
+        controls.localVersion:setText("Version: " .. (current or "sin instalar"))
+        local url = "https://raw.githubusercontent.com/" .. REPOSITORY .. "/" .. BRANCH .. "/Version.lua?t=" .. G.os.time()
         H.get(url, function(contents, requestError)
-            if requestError then return fail("no se pudo consultar la version") end
-            local version = parseVersion(contents)
-            if not version then return fail("el archivo de version no contiene una version reconocible") end
-            if isNewer(version, current) then
-                state.pendingVersion = version
-                setBusy(false)
-                controls.updateButton:setText((current and "Actualizar a " or "Instalar ") .. version)
-                message(current and "Nueva version disponible" or "Instalacion disponible")
-                window.detail:setText("pulsa el boton cuando quieras continuar")
-                scheduleNext()
-            else
-                setBusy(false)
-                controls.updateButton:setText("Actualizar")
-                message("Actualizado")
-                window.progress:setPercent(100)
-                window.detail:setText("proxima comprobacion dentro de un minuto")
-                scheduleNext()
-            end
+            if not isActive() or state.requestId ~= requestId then return end
+            if state.requestTimer then G.removeEvent(state.requestTimer); state.requestTimer = nil end
+            state.requestId = state.requestId + 1
+            local success, callbackError = pcall(function()
+                if requestError then return fail("no se pudo consultar la version") end
+                local version = parseVersion(contents)
+                if not version then return fail("el archivo de version no contiene una version reconocible") end
+                if isNewer(version, current) then
+                    state.pendingVersion = version
+                    setBusy(false)
+                    controls.updateButton:setText((current and "Actualizar a " or "Instalar ") .. version)
+                    message(current and "Nueva version disponible" or "Instalacion disponible")
+                    window.detail:setText("pulsa el boton cuando quieras continuar")
+                else
+                    setBusy(false)
+                    controls.updateButton:setText("Actualizar")
+                    message("Actualizado")
+                    window.progress:setPercent(100)
+                    window.detail:setText("proxima comprobacion en " .. (CHECK_INTERVAL / 1000) .. " segundos")
+                end
+            end)
+            if not success then fail(tostring(callbackError)) end
         end)
     end)
     if not ok then fail(tostring(err)) end
