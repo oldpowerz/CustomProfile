@@ -46,3 +46,5 @@ dofile("/Scripts/hp.lua")
 --customPanel other
 dofile("/Scripts/other.lua")
 dofile("/Scripts/macroeditoringame.lua")
+--customPanel Update
+dofile("/Scripts/update.lua")
