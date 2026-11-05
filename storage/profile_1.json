@@ -1,0 +1,170 @@
+{
+  "hpitem1": {
+    "max": 90,
+    "title": "HP%",
+    "min": 51,
+    "item": 266,
+    "on": false,
+    "subType": 0
+  },
+  "widgetPos": {
+    "DamageScreen": {
+      "y": 665,
+      "x": 0
+    }
+  },
+  "customPanelIcons": {
+    "pvp_right_2_auto_jump": false,
+    "other_right_3_autorefiner": false,
+    "pvp_right_1_attack_target": false
+  },
+  "customPanelIconItems": [
+
+  ],
+  "customPanelScripts": [
+
+  ],
+  "foodItems": [
+    {
+      "count": 1,
+      "id": 3582
+    },
+    {
+      "count": 1,
+      "id": 3577
+    }
+  ],
+  "autoEquip": [
+    {
+      "item1": 3052,
+      "title": "Auto Equip",
+      "item2": 3089,
+      "on": false,
+      "slot": 9
+    },
+    {
+      "item1": 0,
+      "title": "Auto Equip",
+      "item2": 0,
+      "on": false,
+      "slot": 0
+    },
+    {
+      "item1": 0,
+      "title": "Auto Equip",
+      "item2": 0,
+      "on": false,
+      "slot": 0
+    },
+    {
+      "item1": 0,
+      "title": "Auto Equip",
+      "item2": 0,
+      "on": false,
+      "slot": 0
+    }
+  ],
+  "healing2": {
+    "max": 50,
+    "title": "HP%",
+    "on": false,
+    "min": 0,
+    "text": "exura vita"
+  },
+  "erase": 1793847648,
+  "SpyUpKey": "*",
+  "customPanelScriptManager": {
+    "open": false
+  },
+  "maxDamage": 0,
+  "autoTradeMessage": "I'm using OTClientV8!",
+  "hasteSpell": "utani hur",
+  "customPanelScriptsNextId": 1,
+  "antiParalyze": "utani hur",
+  "customPanelScriptsMigrated": true,
+  "_configs": {
+    "targetbot_configs": {
+      "selected": "config_name",
+      "enabled": false
+    },
+    "cavebot_configs": {
+      "selected": "Supreme_demon",
+      "enabled": false
+    }
+  },
+  "healing1": {
+    "max": 90,
+    "title": "HP%",
+    "on": false,
+    "min": 51,
+    "text": "exura"
+  },
+  "SpyDownKey": "-  ",
+  "AutoRefiner": {
+    "enabled": false,
+    "itemId": 0,
+    "refinerItemId": 0
+  },
+  "PushMax": {
+    "pushDelay": 1,
+    "enabled": false,
+    "walkDelay": 1
+  },
+  "manaTrain": {
+    "max": 100,
+    "title": "MP%",
+    "on": false,
+    "min": 80,
+    "text": "utevo lux"
+  },
+  "dropItems": [
+    {
+      "count": 1,
+      "id": 283
+    },
+    {
+      "count": 1,
+      "id": 284
+    },
+    {
+      "count": 1,
+      "id": 285
+    }
+  ],
+  "_macros": {
+    "": false
+  },
+  "manaitem1": {
+    "max": 90,
+    "title": "MP%",
+    "min": 51,
+    "item": 268,
+    "on": false,
+    "subType": 0
+  },
+  "hpitem2": {
+    "max": 50,
+    "title": "HP%",
+    "min": 0,
+    "item": 3160,
+    "on": false,
+    "subType": 0
+  },
+  "manaShield": "utamo vita",
+  "customPanelBackgrounds": {
+    "window": "/bot/CustomBot/resources/background_window_1436181370.png",
+    "bot": ""
+  },
+  "manaitem2": {
+    "max": 50,
+    "title": "MP%",
+    "min": 0,
+    "item": 3157,
+    "on": false,
+    "subType": 0
+  },
+  "customPanelWindow": {
+    "height": 450,
+    "width": 800
+  }
+}
