@@ -1465,13 +1465,37 @@ MainWindow
   id: MainWindow
   size: 498 281
   anchors.centerIn: parent
+  padding-top: 0
+  padding-right: 0
+
+  UIWidget
+    id: closeButton
+    anchors.top: parent.top
+    anchors.right: parent.right
+    margin-top: 4
+    margin-right: 2
+    size: 28 28
+    image-color: #ff3030
+    background-color: alpha
+    border-width: 0
+    tooltip: Cerrar CustomPanel
+    focusable: false
+
+    $hover:
+      image-color: #ff6060
+      background-color: alpha
+
+    $pressed:
+      image-color: #dd2020
+      background-color: alpha
 
   TabBar
     id: tabBar
     anchors.top: parent.top
     anchors.left: parent.left
-    anchors.right: parent.right
+    anchors.right: closeButton.left
     tab-spacing: 1
+    margin-top: 36
     margin-left: 1
     margin-right: 1
     height: 20
@@ -1481,6 +1505,8 @@ MainWindow
     anchors.right: parent.right
     anchors.top: parent.top
     anchors.bottom: parent.bottom
+    margin-top: 36
+    margin-right: 16
     width: 6
     minimum: 420
     maximum: 1000
@@ -1499,7 +1525,7 @@ MainWindow
     minimum: 220
     maximum: 800
     margin-left: 0
-    margin-right: 0
+    margin-right: 16
     background-color: #b778d866
     tooltip: Arrastra para cambiar la altura
 
@@ -1512,7 +1538,7 @@ MainWindow
     anchors.bottom: parent.bottom
     width: 14
     height: 14
-    margin-right: 1
+    margin-right: 17
     margin-bottom: 1
     text: ◢
     text-align: center
@@ -1523,7 +1549,11 @@ MainWindow
 ]], g_ui.getRootWidget())
 
 CustomPanel.window = windowUI
+CustomPanel.window.closeButton:setImageSource(pathBot .. "resources/custom_panel_close.png")
 CustomPanel.window.onEscape = function()
+  CustomPanel.close()
+end
+CustomPanel.window.closeButton.onClick = function()
   CustomPanel.close()
 end
 CustomPanel.window:setWidth(customPanelWindowStorage.width)
@@ -1645,6 +1675,7 @@ BotTabBarPanel
   anchors.left: parent.left
   anchors.right: parent.right
   anchors.bottom: parent.bottom
+  margin-right: 16
 ]],CustomPanel.window)
 
 tabBar:setContentWidget(container)
