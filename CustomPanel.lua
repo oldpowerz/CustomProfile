@@ -89,7 +89,6 @@ do
     end
   end
 
-  -- Una tarea por evento: compatible con el sandbox, sin coroutines.
   local function startJob(callback)
     assert(not backups.busy, "Ya hay una operacion de respaldos en curso.")
     assert(type(callback) == "function", "Falta el callback de finalizacion")
@@ -181,7 +180,6 @@ do
     end)
   end
 
-  -- Prepara el ZIP en memoria; subirlo a la nube no crea una copia local.
   function backups.createProfileArchive(profile, onComplete)
     assert(type(resources.createArchive) == "function", "createArchive no esta disponible en este cliente")
     backups.pack(profile, function(ok, document)
@@ -331,7 +329,6 @@ do
           local files, seenPaths, expanded, count = {}, {}, 0, 0
           for path, contents in pairs(extracted) do
             assert(type(path) == "string" and type(contents) == "string", "Entrada ZIP invalida")
-            -- decompressArchive devuelve nombres con una barra inicial.
             if path:sub(1, 1) == "/" then path = path:sub(2) end
             safePath(path)
             local key = path:lower()
@@ -1475,18 +1472,20 @@ MainWindow
     margin-top: 4
     margin-right: 2
     size: 28 28
-    image-color: #ff3030
+    text: X
+    text-align: center
+    color: #ff3030
     background-color: alpha
     border-width: 0
     tooltip: Cerrar CustomPanel
     focusable: false
 
     $hover:
-      image-color: #ff6060
+      color: #ff6060
       background-color: alpha
 
     $pressed:
-      image-color: #dd2020
+      color: #dd2020
       background-color: alpha
 
   TabBar
@@ -1549,7 +1548,6 @@ MainWindow
 ]], g_ui.getRootWidget())
 
 CustomPanel.window = windowUI
-CustomPanel.window.closeButton:setImageSource(pathBot .. "resources/custom_panel_close.png")
 CustomPanel.window.onEscape = function()
   CustomPanel.close()
 end
@@ -2308,7 +2306,6 @@ CustomPanel.settingsIconCount = 0
 CustomPanel.refreshMountList()
 CustomPanel.flush()
 
--- Acceso en el encabezado de Settings; controles en una ventana independiente.
 do
   local backupWindow = setupUI([[
 MainWindow
@@ -2817,7 +2814,6 @@ Panel
       color: #a5a8b0
       text: la cuenta se guarda cifrada y no se incluye en tus respaldos
 ]], backupWindow)
-  -- Acceso directo a los controles agrupados por seccion.
   for _, page in ipairs({backupEditor.localPage, backupEditor.cloudPage, backupEditor.accountPage}) do
     for _, widget in ipairs(page:getChildren()) do
       local id = widget:getId()
@@ -2972,7 +2968,6 @@ Panel
     if koofr then koofr.cancel() end
   end
 
-  -- El campo se vacia al conectar y nunca se incorpora al storage.
   backupEditor.koofrPassword:setTextHidden(true)
   local listedFolder
   local function refreshRemote(service, folder, finish)
@@ -3081,7 +3076,6 @@ Panel
                g_resources.readFileContents(path) == data, "no se pudo guardar la descarga")
         backups.refreshFiles()
         backupEditor.files:setCurrentOption(file)
-        -- startJob gestiona busy durante la validacion e instalacion.
         backups.busy = false
         backups.install(path, profile, function(ok, result)
           if not ok then backups.showStatus(result) return end
