@@ -4,28 +4,33 @@ local REPOSITORY = "oldpowerz/CustomProfile"
 local BRANCH = "main"
 local CHECK_INTERVAL = 60000
 local CHECK_TIMEOUT = 30000
+local DOWNLOAD_TIMEOUT = 120000
 local G = modules._G
 local R = G.g_resources
 local H = G.HTTP
 local BOT = modules.game_bot
 local TARGET = "/bot/" .. CONFIG_NAME
-local DATA = "/bot_update_data/" .. CONFIG_NAME
-local BASELINE = DATA .. "/original.zip"
-local REPORT = DATA .. "/last-update.txt"
+local VERSION_FILE = TARGET .. "/Version.lua"
 local STATE_KEY = "CustomProfileUpdaterState"
 local old = G[STATE_KEY]
 if old then
-    if old.busy and old.installing then return end
+    if old.busy and old.installing and old.controls and not old.controls:isDestroyed() then return end
+    if old.abortInstall then old.abortInstall("el perfil se recargo durante la instalacion") end
     if old.window and not old.window:isDestroyed() then old.window:destroy() end
     if old.controls and not old.controls:isDestroyed() then old.controls:destroy() end
     if old.timer then G.removeEvent(old.timer) end
     if old.requestTimer then G.removeEvent(old.requestTimer) end
+    old.requestId = (old.requestId or 0) + 1
+    if old.operation and H and H.cancel then pcall(H.cancel, old.operation) end
 end
-local state = {busy = false, timer = nil, revision = 7, pendingVersion = nil, requestId = 0}
+local state = {busy = false, requestId = 0, profile = CONFIG_NAME}
+if old and old.profile == CONFIG_NAME then
+    state.processedVersion, state.notice = old.processedVersion, old.notice
+end
 G[STATE_KEY] = state
 local controls = setupUI([[
 Panel
-  height: 88
+  height: 110
 
   Label
     id: localVersion
@@ -33,7 +38,8 @@ Panel
     anchors.left: parent.left
     anchors.right: parent.right
     text: Version: sin comprobar
-    height: 18
+    height: 36
+    text-wrap: true
 
   Button
     id: check
@@ -111,7 +117,7 @@ local function setBusy(value)
     controls.check:setEnabled(not value)
     controls.updateButton:setEnabled(not value and state.pendingVersion ~= nil)
     controls.updateButton:setVisible(state.pendingVersion ~= nil)
-    controls:setHeight(state.pendingVersion and 113 or 88)
+    controls:setHeight(state.pendingVersion and 135 or 110)
 end
 local function parseVersion(text)
     if type(text) ~= "string" then return nil end
@@ -119,10 +125,19 @@ local function parseVersion(text)
         or text:match('return%s*["\'](%d[%d%.]*)["\']')
 end
 local function localVersion()
-    if state.appliedVersion then return state.appliedVersion end
-    if R.fileExists(TARGET .. "/Version.lua") then
-        return parseVersion(R.readFileContents(TARGET .. "/Version.lua"))
+    if R.fileExists(VERSION_FILE) then
+        return parseVersion(R.readFileContents(VERSION_FILE))
     end
+end
+local function missingVersionFile()
+    return not R.fileExists(VERSION_FILE) and not R.directoryExists(VERSION_FILE)
+end
+local function showLocalVersion(current)
+    local text = "Version local: " .. (current or "no detectada")
+    if state.processedVersion and state.processedVersion ~= current then
+        text = text .. " | Ultima procesada: " .. state.processedVersion
+    end
+    controls.localVersion:setText(text)
 end
 local function isNewer(remote, current)
     if not current then return true end
@@ -141,11 +156,6 @@ local function writeVerified(path, contents)
         error("no se pudo guardar " .. path)
     end
 end
-local function mkdir(path)
-    if not R.directoryExists(path) then R.makeDir(path) end
-    if not R.directoryExists(path) then error("no se pudo crear " .. path) end
-end
-local JSON = G.json or json
 local MAX_BYTES = 256 * 1024 * 1024
 local function safePath(path)
     assert(type(path) == "string" and #path > 0 and #path <= 500 and
@@ -168,132 +178,99 @@ local function protected(path)
         lower:match("%.json$") or lower:match("%.cfg$") or lower:match("%.zip$") or
         lower:match("%.ini$") or lower:match("%.log$") or lower:match("%.bak$")
 end
-local function ensureParent(path)
+local function ensureParent(path, created)
     local current = ""
     for part in path:match("^(.*)/[^/]+$"):gmatch("[^/]+") do
         current = current .. "/" .. part
-        mkdir(current)
-    end
-end
-local function unpackSnapshot(path)
-    local archive = R.decompressArchive(path)
-    assert(type(archive) == "table", "registro de originales no valido")
-    local files, metadata = {}, nil
-    for name, contents in pairs(archive) do
-        name = name:gsub("^/+", "")
-        if name == "snapshot.json" then metadata = JSON.decode(contents)
-        elseif name:sub(1, 6) == "files/" then
-            local relative = name:sub(7)
-            safePath(relative)
-            files[relative] = contents
+        if not R.directoryExists(current) then
+            R.makeDir(current)
+            assert(R.directoryExists(current), "no se pudo crear " .. current)
+            created[#created + 1] = current
         end
     end
-    assert(type(metadata) == "table" and metadata.format == "CustomBotUpdateSnapshot" and
-        metadata.profile == CONFIG_NAME and type(metadata.empty) == "table", "registro incompatible")
-    for _, name in ipairs(metadata.empty) do safePath(name); files[name] = "" end
-    return files, metadata
-end
-local function saveSnapshot(path, files, version)
-    local archive, empty = {}, {}
-    for name, contents in pairs(files) do
-        safePath(name)
-        if contents == "" then empty[#empty + 1] = name else archive["files/" .. name] = contents end
-    end
-    archive["snapshot.json"] = JSON.encode({format = "CustomBotUpdateSnapshot", profile = CONFIG_NAME,
-        version = version, empty = empty, conflicts = state.conflicts or 0})
-    local encoded = R.createArchive(archive)
-    assert(type(encoded) == "string" and #encoded > 0, "no se pudo crear el respaldo")
-    ensureParent(path)
-    writeVerified(path, encoded)
-    local verified = unpackSnapshot(path)
-    for name, contents in pairs(files) do assert(verified[name] == contents, "respaldo incompleto: " .. name) end
-    for name in pairs(verified) do assert(files[name] ~= nil, "respaldo inesperado") end
-end
-local function collectLocal()
-    local files, folders, total, count = {}, {""}, 0, 0
-    local index = 1
-    while folders[index] do
-        local folder = folders[index]
-        local entries = R.listDirectoryFiles(TARGET .. "/" .. folder, false, false)
-        assert(type(entries) == "table", "no se pudo listar el custom")
-        for _, part in ipairs(entries) do
-            safePath(part)
-            assert(not part:find("/", 1, true), "nombre de archivo inesperado")
-            local path = folder .. part
-            if path ~= ".git" and path:sub(1, 5) ~= ".git/" then
-                local absolute = TARGET .. "/" .. path
-                if R.fileExists(absolute) then
-                    local contents = R.readFileContents(absolute)
-                    assert(type(contents) == "string", "no se pudo leer " .. path)
-                    count, total = count + 1, total + #contents
-                    assert(count <= 10000 and total <= MAX_BYTES, "respaldo supera los limites")
-                    files[path] = contents
-                elseif R.directoryExists(absolute) then
-                    assert(#folders < 10000, "demasiadas carpetas")
-                    folders[#folders + 1] = path .. "/"
-                end
-            end
-        end
-        index = index + 1
-    end
-    return files
 end
 
 local checkVersion
 local fail
 local function isActive()
-    return G[STATE_KEY] == state and not controls:isDestroyed()
+    return G[STATE_KEY] == state and not controls:isDestroyed() and not window:isDestroyed()
+end
+local function stopTimer()
+    if state.timer then G.removeEvent(state.timer); state.timer = nil end
+end
+local function clearRequest(cancel)
+    state.requestId = state.requestId + 1
+    if state.requestTimer then G.removeEvent(state.requestTimer); state.requestTimer = nil end
+    local operation = state.operation
+    state.operation = nil
+    if cancel and operation and H and H.cancel then pcall(H.cancel, operation) end
+end
+local function startRequest(timeout, timeoutMessage, keepOffer)
+    clearRequest(true)
+    local id = state.requestId
+    state.requestTimer = G.scheduleEvent(function()
+        if state.requestId ~= id then return end
+        state.requestTimer = nil
+        fail(timeoutMessage, keepOffer)
+    end, timeout)
+    return id
+end
+local function requestCallback(id, callback, keepOffer)
+    return function(...)
+        if state.requestId ~= id then return end
+        clearRequest(false)
+        if not isActive() then return end
+        local ok, err = pcall(callback, ...)
+        if not ok then fail(err, keepOffer) end
+    end
+end
+local function recordRequest(id, ok, operation, keepOffer)
+    if not ok then return fail(operation, keepOffer) end
+    if state.requestId == id then state.operation = operation end
 end
 local function scheduleNext()
-    if state.timer then G.removeEvent(state.timer) end
+    stopTimer()
     state.timer = G.scheduleEvent(function()
         state.timer = nil
         if not isActive() then return end
-        if state.busy then
-            scheduleNext()
-        else
-            checkVersion()
-        end
+        if state.busy then scheduleNext() else checkVersion() end
     end, CHECK_INTERVAL)
 end
-fail = function(text)
-    if not isActive() then return end
-    if state.requestTimer then G.removeEvent(state.requestTimer); state.requestTimer = nil end
-    state.requestId = state.requestId + 1
-    state.pendingVersion = nil
-    setBusy(false)
-    message(tostring(text):lower():gsub("[%p]", " "):gsub("%s+", " "))
-    window.detail:setText("se comprobara de nuevo en " .. (CHECK_INTERVAL / 1000) .. " segundos")
-    if state.installing then window:show() end
+fail = function(text, keepOffer)
+    clearRequest(true)
+    local installing = state.installing
     state.installing = false
+    if not isActive() then return end
+    if not keepOffer then state.pendingVersion = nil end
+    setBusy(false)
+    message(tostring(text))
+    window.detail:setText(keepOffer and "Pulsa Actualizar para reintentar o Comprobar para buscar otra version."
+        or "se comprobara de nuevo en " .. (CHECK_INTERVAL / 1000) .. " segundos")
+    if installing then window:show() end
     scheduleNext()
 end
-local function finish(version, added, kept, initial)
+local function finish(completion)
     state.pendingVersion = nil
     controls.updateButton:setText("Actualizar")
     setBusy(false)
+    showLocalVersion(localVersion())
     window.progress:setPercent(100)
-    message(state.notice or (initial and "instalacion completada" or "actualizacion completada"))
-    window.detail:setText("Respaldo: " .. (state.backupPath or "") .. " | Informe: " .. REPORT)
+    message(state.notice or completion)
+    window.detail:setText("El ZIP se proceso en memoria.")
     state.installing = false
-    if state.conflicts and state.conflicts > 0 then window:show() else window:hide() end
+    if state.notice then window:show() else window:hide() end
     scheduleNext()
     G.scheduleEvent(function()
-        BOT.refresh()
-        BOT.contentsPanel.config:setCurrentOption(CONFIG_NAME)
+        if not isActive() then return end
+        local option = BOT.contentsPanel.config:getCurrentOption()
+        if option and option.text == CONFIG_NAME then BOT.refresh() end
     end, 200)
 end
-local function extractAndMerge(path, expectedVersion)
-    local archivePath = "/downloads/" .. path
-    local data = R.readFileContents(archivePath)
-    if type(data) ~= "string" or data:sub(1, 2) ~= "PK" then
-        error("la descarga no es un zip comprueba el acceso publico al repositorio")
-    end
-    local files = R.decompressArchive(archivePath)
+local function extractAndMerge(data, expectedVersion)
+    assert(type(data) == "string" and #data >= 64 and #data <= MAX_BYTES and data:sub(1, 2) == "PK",
+        "la descarga no es un ZIP valido o supera el limite")
+    local files = R.decompressArchive(data)
     if type(files) ~= "table" then error("no se pudo extraer el zip") end
-    assert(type(R.createArchive) == "function" and type(R.listDirectoryFiles) == "function" and
-        JSON and type(JSON.encode) == "function" and type(JSON.decode) == "function",
-        "el cliente no permite respaldos seguros")
     local entries, root, sameRoot = {}, nil, true
     local total = 0
     for name, contents in pairs(files) do
@@ -314,7 +291,6 @@ local function extractAndMerge(path, expectedVersion)
             entries[#entries + 1] = {path = name, contents = contents}
         end
     end
-    local versionContents
     local remote, seen = {}, {}
     for _, entry in ipairs(entries) do
         if sameRoot and root then entry.path = entry.path:sub(#root + 2) end
@@ -322,36 +298,24 @@ local function extractAndMerge(path, expectedVersion)
         local lower = entry.path:lower()
         if seen[lower] then error("rutas duplicadas en el zip") end
         seen[lower] = true
-        if entry.path == "Version.lua" then
-            versionContents = entry.contents
-        end
         if not protected(entry.path) then remote[entry.path] = entry.contents end
     end
-    if parseVersion(versionContents) ~= expectedVersion then
-        error("la version del zip no coincide con la version consultada vuelve a comprobar")
-    end
-    local initial = not localVersion()
-    if BOT.save then BOT.save() end
-    local localFiles = collectLocal()
-    local baseline = {}
-    if R.fileExists(BASELINE) then baseline = unpackSnapshot(BASELINE) end
-    local planned, conflicts, conflictFiles, lines, kept = {}, {}, {}, {}, 0
+    assert(parseVersion(remote["Version.lua"]) == expectedVersion,
+        "la version del zip no coincide con la version consultada vuelve a comprobar")
+    local currentVersion = localVersion()
+    local repairVersion = missingVersionFile()
+    assert(not isNewer(currentVersion or expectedVersion, expectedVersion) and
+        not isNewer(state.processedVersion or expectedVersion, expectedVersion),
+        "el ZIP es anterior a la version local o procesada; vuelve a comprobar")
+    local planned, conflicts = {}, 0
     for name, contents in pairs(remote) do
-        local current, original = localFiles[name], baseline[name]
-        if R.directoryExists(TARGET .. "/" .. name) then
-            conflicts[#conflicts + 1] = name .. " (existe una carpeta)"
-            conflictFiles[name] = contents
-        elseif current == contents then
-            kept = kept + 1
-        elseif current == nil and original == nil then
+        local path = TARGET .. "/" .. name
+        if R.directoryExists(path) then
+            conflicts = conflicts + 1
+        elseif not R.fileExists(path) then
             planned[#planned + 1] = {path = name, contents = contents}
-        elseif current ~= nil and original ~= nil and current == original then
-            planned[#planned + 1] = {path = name, contents = contents, before = current}
-        elseif original == nil or contents ~= original then
-            conflicts[#conflicts + 1] = name .. (original == nil and " (sin referencia previa)" or " (cambios locales y remotos)")
-            conflictFiles[name] = contents
-        else
-            kept = kept + 1
+        elseif R.readFileContents(path) ~= contents then
+            conflicts = conflicts + 1
         end
     end
     table.sort(planned, function(a, b)
@@ -359,68 +323,71 @@ local function extractAndMerge(path, expectedVersion)
         if b.path == "Version.lua" then return true end
         return a.path < b.path
     end)
-    table.sort(conflicts)
-    mkdir("/bot_update_data")
-    mkdir(DATA)
-    local stamp = tostring(G.os.time())
-    local backupPath = DATA .. "/backup-" .. stamp .. ".zip"
-    local suffix = 0
-    while R.fileExists(backupPath) do
-        suffix = suffix + 1
-        backupPath = DATA .. "/backup-" .. stamp .. "-" .. suffix .. ".zip"
+    assert(type(R.deleteFile) == "function", "el cliente no permite revertir archivos nuevos")
+    local index, attempted, created = 1, 0, {}
+    local function abortInstall(reason)
+        if state.abortInstall ~= abortInstall then return end
+        state.abortInstall = nil
+        local failures = {}
+        for i = attempted, 1, -1 do
+            local entry = planned[i]
+            local path = TARGET .. "/" .. entry.path
+            local ok, err = pcall(function()
+                if R.fileExists(path) then
+                    assert(not entry.verified or R.readFileContents(path) == entry.contents,
+                        "se conservo un cambio posterior: " .. path)
+                    R.deleteFile(path)
+                    assert(not R.fileExists(path), "no se pudo revertir " .. path)
+                end
+            end)
+            if not ok then failures[#failures + 1] = tostring(err) end
+        end
+        for i = #created, 1, -1 do
+            pcall(function()
+                local entries = R.listDirectoryFiles(created[i], false, false)
+                if type(entries) == "table" and not next(entries) then R.deleteFile(created[i]) end
+            end)
+        end
+        local result = #failures == 0 and "Cambios revertidos." or "Reversion incompleta: " .. table.concat(failures, "; ")
+        fail("Instalacion detenida: " .. reason .. ". " .. result, true)
     end
-    message("creando y verificando respaldo")
-    if R.fileExists(BASELINE) then
-        writeVerified(backupPath .. ".original.zip", R.readFileContents(BASELINE))
-    end
-    saveSnapshot(backupPath, localFiles, localVersion())
-    state.backupPath = backupPath
-    lines = {"Perfil: " .. CONFIG_NAME, "Version remota: " .. expectedVersion,
-        "Respaldo: " .. backupPath, "Conflictos conservados: " .. #conflicts}
-    for _, name in ipairs(conflicts) do
-        lines[#lines + 1] = "CONFLICTO: " .. name
-    end
-    for _, entry in ipairs(planned) do lines[#lines + 1] = "APLICAR: " .. entry.path end
-    writeVerified(REPORT, table.concat(lines, "\n"))
-    -- Guardar las alternativas remotas fuera del custom, nunca encima de archivos del usuario.
-    for path, contents in pairs(conflictFiles) do
-        local alternative = backupPath .. ".remote/" .. path
-        ensureParent(alternative)
-        writeVerified(alternative, contents)
-    end
-    local index, added = 1, 0
     local function batch()
+        if state.abortInstall ~= abortInstall then return end
+        if not isActive() then return abortInstall("el perfil se cerro durante la instalacion") end
         local ok, err = pcall(function()
             local last = math.min(index + 14, #planned)
             while index <= last do
                 local entry = planned[index]
                 local destination = TARGET .. "/" .. entry.path
-                local current = R.fileExists(destination) and R.readFileContents(destination) or nil
-                assert(current == entry.before and not R.directoryExists(destination),
-                    "archivo cambiado durante la actualizacion: " .. entry.path .. "; respaldo: " .. backupPath)
-                ensureParent(destination)
+                assert(not R.fileExists(destination) and not R.directoryExists(destination),
+                    "aparecio un archivo durante la actualizacion: " .. entry.path)
+                ensureParent(destination, created)
+                attempted = index
                 writeVerified(destination, entry.contents)
-                added = added + 1
+                entry.verified = true
                 index = index + 1
             end
-            window.progress:setPercent(math.floor(math.min(index - 1, #planned) / math.max(1, #planned) * 100))
-            window.detail:setText("instalando " .. math.min(index - 1, #planned) .. "/" .. #planned .. " archivos nuevos")
+            local applied = index - 1
+            window.progress:setPercent(math.floor(applied / math.max(1, #planned) * 100))
+            window.detail:setText("instalando " .. applied .. "/" .. #planned .. " archivos")
             if index <= #planned then
                 G.scheduleEvent(batch, 10)
-            else
-                state.conflicts = #conflicts
-                saveSnapshot(BASELINE, remote, expectedVersion)
-                state.appliedVersion = expectedVersion
-                state.notice = #conflicts > 0 and ("Actualizado con " .. #conflicts .. " conflictos. Ver informe.") or nil
-                if state.notice then print("[CustomBot Update] " .. state.notice .. " " .. REPORT) end
-                finish(expectedVersion, added, kept, initial)
             end
         end)
-        if not ok then fail("instalacion detenida " .. tostring(err) .. "; respaldo: " .. backupPath) end
+        if not ok then return abortInstall(tostring(err)) end
+        if index > #planned then
+            state.abortInstall = nil
+            state.processedVersion = expectedVersion
+            state.notice = conflicts > 0 and ("Se conservaron " .. conflicts .. " archivos o carpetas existentes.") or nil
+            finish(repairVersion and "archivo Version.lua restaurado" or
+                (currentVersion and "actualizacion completada" or "instalacion completada"))
+        end
     end
     message("aplicando actualizacion segura")
     window.progress:setPercent(0)
-    G.scheduleEvent(batch, 10)
+    state.abortInstall = abortInstall
+    local scheduled, err = pcall(G.scheduleEvent, batch, 10)
+    if not scheduled then abortInstall(tostring(err)) end
 end
 local function download(version)
     state.installing = true
@@ -428,89 +395,62 @@ local function download(version)
     window:show()
     window.progress:setPercent(0)
     local url = "https://github.com/" .. REPOSITORY .. "/archive/refs/heads/" .. BRANCH .. ".zip?t=" .. G.os.time()
+    local id = startRequest(DOWNLOAD_TIMEOUT, "La descarga del ZIP agoto el tiempo de espera.", true)
     local previous = H.timeout
-    H.timeout = 120
-    local ok, err = pcall(function()
-        H.download(url, "CustomProfile_update.zip", function(path, checksum, downloadError)
-            if downloadError then return fail("no se pudo descargar el zip") end
-            message("comprobando el zip")
-            local success, mergeError = pcall(extractAndMerge, path, version)
-            if not success then fail(tostring(mergeError)) end
-        end, function(progress, speed)
-            window.progress:setPercent(progress)
-            window.detail:setText(string.format("descarga %d%% velocidad %s kb por segundo", math.floor(progress), tostring(speed)))
-        end)
-    end)
+    H.timeout = DOWNLOAD_TIMEOUT / 1000
+    local ok, operation = pcall(H.get, url, requestCallback(id, function(data, downloadError)
+        if downloadError then return fail("No se pudo descargar el ZIP: " .. tostring(downloadError), true) end
+        message("comprobando el zip")
+        extractAndMerge(data, version)
+    end, true))
     H.timeout = previous
-    if not ok then fail(tostring(err)) end
+    recordRequest(id, ok, operation, true)
 end
 checkVersion = function()
     if not isActive() or state.busy then return end
-    if state.timer then G.removeEvent(state.timer); state.timer = nil end
+    stopTimer()
     state.pendingVersion = nil
     setBusy(true)
-    state.requestId = state.requestId + 1
-    local requestId = state.requestId
+    local requestId = startRequest(CHECK_TIMEOUT, "La consulta de version agoto el tiempo de espera.")
     scheduleNext()
-    state.requestTimer = G.scheduleEvent(function()
-        state.requestTimer = nil
-        if isActive() and state.requestId == requestId then
-            fail("la consulta de version ha agotado el tiempo de espera")
-        end
-    end, CHECK_TIMEOUT)
-    local ok, err = pcall(function()
+    local ok, operation = pcall(function()
         message("Comprobando...")
         window.progress:setPercent(0)
         local current = localVersion()
-        controls.localVersion:setText("Version: " .. (current or "sin instalar"))
+        showLocalVersion(current)
         local url = "https://raw.githubusercontent.com/" .. REPOSITORY .. "/" .. BRANCH .. "/Version.lua?t=" .. G.os.time()
-        H.get(url, function(contents, requestError)
-            if not isActive() or state.requestId ~= requestId then return end
-            if state.requestTimer then G.removeEvent(state.requestTimer); state.requestTimer = nil end
-            state.requestId = state.requestId + 1
-            local success, callbackError = pcall(function()
-                if requestError then return fail("no se pudo consultar la version") end
-                local version = parseVersion(contents)
-                if not version then return fail("el archivo de version no contiene una version reconocible") end
-                if isNewer(version, current) then
-                    state.pendingVersion = version
-                    setBusy(false)
-                    controls.updateButton:setText((current and "Actualizar a " or "Instalar ") .. version)
-                    message(current and "Nueva version disponible" or "Instalacion disponible")
-                    window.detail:setText("pulsa el boton cuando quieras continuar")
-                else
-                    setBusy(false)
-                    controls.updateButton:setText("Actualizar")
-                    message(state.notice or "Actualizado")
-                    window.progress:setPercent(100)
-                    window.detail:setText("proxima comprobacion en " .. (CHECK_INTERVAL / 1000) .. " segundos")
-                end
-            end)
-            if not success then fail(tostring(callbackError)) end
-        end)
+        return H.get(url, requestCallback(requestId, function(contents, requestError)
+            if requestError then return fail("No se pudo consultar la version: " .. tostring(requestError)) end
+            local version = parseVersion(contents)
+            if not version then return fail("el archivo de version no contiene una version reconocible") end
+            local repair = missingVersionFile()
+            local processed = state.processedVersion
+            if isNewer(version, current) and (isNewer(version, processed) or
+                (repair and not isNewer(processed, version))) then
+                state.pendingVersion = version
+                controls.updateButton:setText((repair and "Reparar con " or
+                    (current and "Actualizar a " or "Instalar ")) .. version)
+                message(repair and "Falta Version.lua; puedes recuperarlo" or
+                    (current and "Nueva version disponible" or "Instalacion disponible"))
+                window.detail:setText("pulsa el boton cuando quieras continuar")
+            else
+                controls.updateButton:setText("Actualizar")
+                message(repair and "Falta Version.lua; la version remota es anterior" or state.notice or "Actualizado")
+                window.progress:setPercent(100)
+                window.detail:setText("proxima comprobacion en " .. (CHECK_INTERVAL / 1000) .. " segundos")
+            end
+            setBusy(false)
+        end))
     end)
-    if not ok then fail(tostring(err)) end
+    recordRequest(requestId, ok, operation)
 end
 controls.check.onClick = checkVersion
 controls.updateButton.onClick = function()
     if state.busy or not state.pendingVersion then return end
     local version = state.pendingVersion
-    if state.timer then G.removeEvent(state.timer); state.timer = nil end
+    stopTimer()
     setBusy(true)
-    download(version)
+    local ok, err = pcall(download, version)
+    if not ok then fail(tostring(err), true) end
 end
-local ok, err = pcall(function()
-    if R.fileExists(BASELINE) then
-        local _, metadata = unpackSnapshot(BASELINE)
-        state.appliedVersion = metadata.version
-        state.conflicts = metadata.conflicts or 0
-        if state.conflicts > 0 then
-            state.notice = "Actualizado con " .. state.conflicts .. " conflictos. Ver informe."
-        end
-    end
-end)
-if not ok then
-    fail(tostring(err))
-else
-    checkVersion()
-end
+checkVersion()
