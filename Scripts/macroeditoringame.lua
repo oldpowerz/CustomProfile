@@ -208,6 +208,9 @@ local managerLoaded, managerError = pcall(function()
       load = true, _G = true
     }
 
+    -- Algunos sandboxes permiten leer globales desde loadstring pero descartan
+    -- sus escrituras. Predeclarar las asignaciones de nivel raiz como locales
+    -- hace que funciones y callbacks del mismo script compartan esos valores.
     local function findRootAssignedNames(source)
       local names, found = {}, {}
       for line in (source .. "\n"):gmatch("([^\n]*)\n") do
