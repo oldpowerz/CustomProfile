@@ -13,8 +13,11 @@ do
   local resources = g_resources
   local protected = {
     ["custom_profiles.lua"] = true, ["CustomPanel.lua"] = true,
-    ["koofr_lib.lua"] = true
+    ["koofr.lua"] = true, ["koofr_dav.lua"] = true, ["httpLib.lua"] = true,
+    ["pcloud.lua"] = true, ["pcloud_dav.lua"] = true
   }
+
+  local obsolete = {["koofr_lib.lua"] = true, ["koofr_http.lua"] = true}
 
   local function validSlot(profile)
     assert(type(profile) == "number" and profile == math.floor(profile) and
@@ -153,7 +156,7 @@ do
       safePath(path)
       if resources.fileExists(base .. path) then
         local slot = path:lower():match("^storage/profile_(%d+)%.json$")
-        if not slot or tonumber(slot) == profile then
+        if not obsolete[path:lower()] and (not slot or tonumber(slot) == profile) then
           local data = resources.readFileContents(base .. path)
           count = count + 1
           total = total + #data
@@ -252,7 +255,7 @@ do
         total = total + #value
         assert(total <= backups.maxFileBytes, "La config supera 256 MiB")
       end
-      if not entry.core and protected[path] then
+      if not entry.core and (protected[path] or obsolete[path:lower()]) then
         index = index + 1
         job.go(process)
         return
@@ -2311,7 +2314,7 @@ do
 MainWindow
   id: customPanelBackupsWindow
   text: respaldos de perfiles
-  size: 540 520
+  size: 540 556
   anchors.centerIn: parent
 
   Button
@@ -2360,7 +2363,7 @@ Panel
     anchors.top: parent.top
     anchors.left: parent.left
     anchors.right: parent.right
-    height: 78
+    height: 114
     border-width: 1
     border-color: #44464f
     phantom: true
@@ -2434,6 +2437,25 @@ Panel
     height: 24
     placeholder: ejemplo: entomatadas
 
+  Label
+    id: providerLabel
+    margin-left: 10
+    anchors.top: slot.bottom
+    anchors.left: parent.left
+    margin-top: 6
+    width: 120
+    height: 24
+    text: nube
+    color: #a5a8b0
+
+  ComboBox
+    id: cloudProvider
+    anchors.top: providerLabel.top
+    anchors.left: nameLabel.left
+    anchors.right: parent.right
+    margin-right: 10
+    height: 24
+
   Button
     id: localTab
     margin-left: 6
@@ -2455,7 +2477,7 @@ Panel
     margin-left: 6
     width: 82
     height: 28
-    text: koofr
+    text: nube
 
     $on:
       color: #75cfff
@@ -2626,7 +2648,7 @@ Panel
       anchors.top: parent.top
       anchors.left: parent.left
       height: 18
-      text: carpeta en koofr
+      text: carpeta en la nube
       color: #75cfff
 
     TextEdit
@@ -2757,7 +2779,7 @@ Panel
       anchors.right: parent.right
       height: 36
       text-wrap: true
-      text: si ya conectaste esta cuenta abre koofr para ver tus archivos
+      text: elige la nube arriba y conecta tu cuenta para ver tus archivos
 
     Label
       color: #a5a8b0
@@ -2825,12 +2847,18 @@ Panel
   local confirmation
   local cloudConfirmation
   local updateRemoteAction
+  local providerKeys = {"koofr", "pcloud_us", "pcloud_eu"}
+  local providerNames = {"koofr", "pcloud estados unidos", "pcloud europa"}
+  local providerIndex = 1
+  local function cloudName() return providerNames[providerIndex] end
+  for _, name in ipairs(providerNames) do backupEditor.cloudProvider:addOption(name) end
+  backupEditor.cloudProvider:setCurrentIndex(providerIndex, true)
 
   local function resetConfirmation()
     confirmation = nil
     cloudConfirmation = nil
     backupEditor.importBtn:setText("restaurar perfil")
-    backupEditor.uploadKoofr:setText("guardar en koofr")
+    backupEditor.uploadKoofr:setText(providerKeys[providerIndex] == "pcloud_us" and "guardar pcloud (USA)" or "guardar en " .. cloudName())
     if updateRemoteAction then updateRemoteAction() end
   end
 
@@ -2851,7 +2879,7 @@ Panel
   backupEditor.filename.onTextChange = resetConfirmation
   backupEditor.koofrFolder.onTextChange = resetConfirmation
   backupEditor.files.onOptionChange = resetConfirmation
-  backupEditor.filename:setTooltip("nombre para crear una copia local o en koofr. no se usa al restaurar.")
+  backupEditor.filename:setTooltip("nombre para crear una copia local o en la nube. no se usa al restaurar.")
   backupEditor.slot:setTooltip("guardar copia este perfil. restaurar reemplaza los datos de este perfil.")
   backupEditor.koofrPassword:setTooltip("usa una contrasena de aplicacion webdav creada en tu cuenta de koofr.")
 
@@ -2923,6 +2951,7 @@ Panel
   end)
 
   local koofr
+  local cloudServices = {}
   local remoteEntries = {}
 
   updateRemoteAction = function()
@@ -2935,30 +2964,37 @@ Panel
   backupEditor.remoteFiles.onOptionChange = updateRemoteAction
 
   local function getKoofr()
-    if not koofr then
-      dofile("/koofr_lib.lua")
-      koofr = assert(CustomPanelKoofr, "no se pudo cargar koofr")
+    local key = providerKeys[providerIndex]
+    local kind = key == "koofr" and "koofr" or "pcloud"
+    local service = cloudServices[kind]
+    if not service then
+      dofile("/" .. kind .. ".lua")
+      service = assert(kind == "koofr" and CustomPanelKoofr or CustomPanelPCloud,
+        "no se pudo cargar " .. kind)
+      cloudServices[kind] = service
     end
-    return koofr
+    service.selectProvider(key)
+    koofr = service
+    return service
   end
 
   local function nativeTask(task)
     local service = getKoofr()
     backups.busy = true
-    backups.showStatus("conectando con koofr...")
+    backups.showStatus("conectando con " .. cloudName())
     local ok, message = pcall(service.run, task, function(success, result)
       if not success or result ~= "installing" then backups.busy = false end
       if not success then backups.showStatus(result) end
     end, function(sent, total, received, expected)
       if total > 0 and sent < total then
-        backups.showStatus("subiendo a koofr: " .. math.floor(sent * 100 / total) .. "%")
+        backups.showStatus("subiendo a " .. cloudName() .. ": " .. math.floor(sent * 100 / total) .. "%")
       elseif received > 0 then
         local amount = expected and expected > 0 and
           (math.floor(received * 100 / expected) .. "%") or
           (math.floor(received / 1024) .. " kib")
-        backups.showStatus("recibiendo de koofr: " .. amount)
+        backups.showStatus("recibiendo de " .. cloudName() .. ": " .. amount)
       else
-        backups.showStatus("esperando respuesta de koofr...")
+        backups.showStatus("esperando respuesta de " .. cloudName())
       end
     end)
     if not ok then backups.busy = false; backups.showStatus(message) end
@@ -2970,6 +3006,32 @@ Panel
 
   backupEditor.koofrPassword:setTextHidden(true)
   local listedFolder
+  backupEditor.cloudProvider.onOptionChange = function(widget)
+    if backups.busy then
+      widget:setCurrentIndex(providerIndex, true)
+      backups.showStatus("espera a que termine la operacion antes de cambiar de nube")
+      return
+    end
+    providerIndex = widget.currentIndex
+    koofr = nil
+    remoteEntries = {}
+    listedFolder = nil
+    backupEditor.remoteFiles:clearOptions()
+    backupEditor.koofrFolder:setText("/")
+    backupEditor.koofrEmail:setText("")
+    backupEditor.koofrPassword:setText("")
+    local isKoofr = providerIndex == 1
+    backupEditor.folderLabel:setText("carpeta en " .. cloudName())
+    backupEditor.emailLabel:setText("correo de " .. cloudName())
+    backupEditor.passwordLabel:setText(isKoofr and "contrasena de aplicacion webdav" or "contrasena de pcloud")
+    backupEditor.koofrPassword:setTooltip(isKoofr and
+      "usa una contrasena de aplicacion webdav creada en koofr" or
+      "usa tu contrasena de pcloud. si tienes 2fa aprueba la conexion desde tu correo")
+    resetConfirmation()
+    updateRemoteAction()
+    backups.showStatus("seleccionado " .. cloudName() .. " conecta tu cuenta o pulsa ver archivos si ya esta guardada")
+  end
+
   local function refreshRemote(service, folder, finish)
     service.list(folder, function(entries)
       remoteEntries = entries
@@ -3024,10 +3086,10 @@ Panel
     local profile = backupEditor.slot.currentIndex
     local file = backups.filename(backupEditor.filename:getText())
     local folder = service.path(backupEditor.koofrFolder:getText())
-    local key = "upload:" .. profile .. ":" .. folder .. ":" .. file
+    local key = "upload:" .. providerKeys[providerIndex] .. ":" .. profile .. ":" .. folder .. ":" .. file
     if cloudConfirmation ~= key then
       cloudConfirmation = key
-      backupEditor.uploadKoofr:setText("confirmar guardado en koofr")
+      backupEditor.uploadKoofr:setText("confirmar guardado")
       backups.showStatus("guardar " .. file .. " desde el perfil " .. profile ..
         " en " .. folder .. ". si ya existe se actualizara. pulsa otra vez para confirmar.")
       return
@@ -3037,7 +3099,7 @@ Panel
       if not ok then backups.showStatus(result) return end
       nativeTask(function(finish)
         service.upload(folder, file, result, function()
-          backups.showStatus("guardado en tu koofr: " .. file)
+          backups.showStatus("guardado en " .. cloudName() .. ": " .. file)
           finish(true)
         end)
       end)
@@ -3047,7 +3109,7 @@ Panel
   bindButton(backupEditor.downloadKoofr, function()
     local service = getKoofr()
     local selected = remoteEntries[backupEditor.remoteFiles.currentIndex]
-    assert(selected, "pulsa listar carpeta de koofr y selecciona una.")
+    assert(selected, "pulsa ver archivos de la nube y selecciona uno.")
     assert(listedFolder == service.path(backupEditor.koofrFolder:getText()), "la ruta cambio. vuelve a listar la carpeta.")
     if selected.folder then
       nativeTask(function(finish) refreshRemote(service, selected.id, finish) end)
@@ -3056,7 +3118,7 @@ Panel
     local profile = backupEditor.slot.currentIndex
     local file = backups.filename(selected.name)
     local path = directory .. "/" .. file
-    local key = "download:" .. profile .. ":" .. selected.id
+    local key = "download:" .. providerKeys[providerIndex] .. ":" .. profile .. ":" .. selected.id
     if cloudConfirmation ~= key then
       cloudConfirmation = key
       backupEditor.downloadKoofr:setText("confirmar perfil " .. profile)
@@ -3079,7 +3141,7 @@ Panel
         backups.busy = false
         backups.install(path, profile, function(ok, result)
           if not ok then backups.showStatus(result) return end
-          backups.showStatus("importado desde koofr al perfil " .. profile)
+          backups.showStatus("importado desde " .. cloudName() .. " al perfil " .. profile)
           schedule(100, function()
             if not CustomPanel.setProfile(profile, {skipSave = true, forceReload = true}) then
               backups.showStatus("importado. revisa customprofiles para cargar el perfil.")
@@ -3132,7 +3194,7 @@ Panel
   setSection("local")
   backupEditor.importBtn:setEnabled(false)
   updateRemoteAction()
-  backups.showStatus("elige un perfil arriba. guarda una copia local o abre koofr para usar tus respaldos en la nube. la conexion se configura en cuenta.")
+  backups.showStatus("elige un perfil arriba. guarda una copia local o elige tu nube para usar tus respaldos. la conexion se configura en cuenta.")
 end
 
 --[[UI.createWidget("Label", panelMain.content.left):setText("Script Here")
